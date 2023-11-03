@@ -1,20 +1,31 @@
-## Changes
+# Pull Request Template
 
-- What does this change?
-- Be short and concise. Bullet points can help!
-- Before/after screenshots can help as well.
-- Don't forget a changeset! `pnpm exec changeset`
+**Description:**
 
-## Testing
+[Provide a brief description of the changes made in this pull request.]
 
-<!-- How was this change tested? -->
-<!-- DON'T DELETE THIS SECTION! If no tests added, explain why. -->
+**Related Issues:**
 
-## Docs
+[Link to any related issues or tickets, if applicable.]
 
-<!-- Could this affect a user’s behavior? We probably need to update docs! -->
-<!-- If docs will be needed or you’re not sure, uncomment the next line: -->
-<!-- /cc @withastro/maintainers-docs for feedback! -->
+**Screenshots (if relevant):**
 
-<!-- DON'T DELETE THIS SECTION! If no docs added, explain why.-->
-<!-- https://github.com/withastro/docs -->
+[Include screenshots or images to help visualize the changes, if applicable.]
+
+**Checklist:**
+
+- [ ] I have tested the changes locally.
+- [ ] My code follows the project's coding conventions.
+- [ ] I have updated the documentation, if necessary.
+- [ ] I have added tests, if relevant.
+- [ ] I have reviewed my own code to ensure it's ready for peer review.
+- [ ] I have requested a review from [mention reviewers here].
+
+**Additional Notes:**
+
+[Provide any additional information, notes, or context about the changes made.]
+
+**By submitting this pull request, I confirm that I have read and agree to the [Code of Conduct](link-to-code-of-conduct) of this project.**
+
+[Add any other necessary information or links here.]
+
