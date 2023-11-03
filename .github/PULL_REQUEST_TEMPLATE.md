@@ -2,30 +2,33 @@
 
 **Description:**
 
-[Provide a brief description of the changes made in this pull request.]
+This pull request addresses issue #123 and introduces a new feature that allows users to customize their profile avatars.
 
 **Related Issues:**
 
-[Link to any related issues or tickets, if applicable.]
+- Closes #123
+- Addresses #456
 
 **Screenshots (if relevant):**
 
-[Include screenshots or images to help visualize the changes, if applicable.]
+![Screenshot 1](/screenshots/screenshot1.png)
 
 **Checklist:**
 
-- [ ] I have tested the changes locally.
-- [ ] My code follows the project's coding conventions.
+- [x] I have tested the changes locally.
+- [x] My code follows the project's coding conventions.
 - [ ] I have updated the documentation, if necessary.
-- [ ] I have added tests, if relevant.
-- [ ] I have reviewed my own code to ensure it's ready for peer review.
-- [ ] I have requested a review from [mention reviewers here].
+- [x] I have added tests, if relevant.
+- [x] I have reviewed my own code to ensure it's ready for peer review.
+- [ ] I have requested a review from @username, @another-reviewer.
 
 **Additional Notes:**
 
-[Provide any additional information, notes, or context about the changes made.]
+- The new feature includes an option in the user settings page to upload a custom avatar image.
+- I've added validation to ensure avatar images meet the required dimensions.
 
 **By submitting this pull request, I confirm that I have read and agree to the [Code of Conduct](link-to-code-of-conduct) of this project.**
 
 [Add any other necessary information or links here.]
+
 
