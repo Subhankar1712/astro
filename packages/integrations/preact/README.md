@@ -53,21 +53,22 @@ npm install preact
 
 Then, apply this integration to your `astro.config.*` file using the `integrations` property:
 
-__`astro.config.mjs`__
-
-```js
+```diff lang="js" "preact()"
+// astro.config.mjs
 import { defineConfig } from 'astro/config';
-import preact from '@astrojs/preact';
++ import preact from '@astrojs/preact';
 
 export default defineConfig({
   // ...
   integrations: [preact()],
+  //             ^^^^^^^^
 });
 ```
 
 ## Usage
 
 To use your first Preact component in Astro, head to our [UI framework documentation][astro-ui-frameworks]. You'll explore:
+
 - 📦 how framework components are loaded,
 - 💧 client-side hydration options, and
 - 🤝 opportunities to mix and nest frameworks together
@@ -86,15 +87,14 @@ You can enable `preact/compat`, Preact’s compatibility layer for rendering Rea
 
 To do so, pass an object to the Preact integration and set `compat: true`.
 
-```js
+```js "compat: true"
 // astro.config.mjs
 import { defineConfig } from 'astro/config';
 import preact from '@astrojs/preact';
 
 export default defineConfig({
-  integrations: [
-    preact({ compat: true })
-  ],
+  integrations: [preact({ compat: true })],
+  //                      ^^^^^^^^^^^^
 });
 ```
 
@@ -102,8 +102,7 @@ With the `compat` option enabled, the Preact integration will render React compo
 
 When importing React component libraries, in order to swap out the `react` and `react-dom` dependencies as `preact/compat`, you can use [`overrides`](https://docs.npmjs.com/cli/v8/configuring-npm/package-json#overrides) to do so.
 
-```js
-// package.json
+```json title="package.json"
 {
   "overrides": {
     "react": "npm:@preact/compat@latest",
@@ -117,6 +116,41 @@ Check out the [`pnpm` overrides](https://pnpm.io/package_json#pnpmoverrides) and
 > **Note**
 > Currently, the `compat` option only works for React libraries that export code as ESM. If an error happens during build-time, try adding the library to `vite.ssr.noExternal: ['the-react-library']` in your `astro.config.mjs` file.
 
+## Options
+
+### Combining multiple JSX frameworks
+
+When you are using multiple JSX frameworks (React, Preact, Solid) in the same project, Astro needs to determine which JSX framework-specific transformations should be used for each of your components. If you have only added one JSX framework integration to your project, no extra configuration is needed.
+
+Use the `include` (required) and `exclude` (optional) configuration options to specify which files belong to which framework. Provide an array of files and/or folders to `include` for each framework you are using. Wildcards may be used to include multiple file paths.
+
+We recommend placing common framework components in the same folder (e.g. `/components/react/` and `/components/solid/`) to make specifying your includes easier, but this is not required:
+
+```js
+// astro.config.mjs
+import { defineConfig } from 'astro/config';
+import preact from '@astrojs/preact';
+import react from '@astrojs/react';
+import svelte from '@astrojs/svelte';
+import vue from '@astrojs/vue';
+import solid from '@astrojs/solid-js';
+
+export default defineConfig({
+  // Enable many frameworks to support all different kinds of components.
+  // No `include` is needed if you are only using a single JSX framework!
+  integrations: [
+    preact({
+      include: ['**/preact/*'],
+    }),
+    react({
+      include: ['**/react/*'],
+    }),
+    solid({
+      include: ['**/solid/*'],
+    }),
+  ],
+});
+```
 
 ## Examples
 

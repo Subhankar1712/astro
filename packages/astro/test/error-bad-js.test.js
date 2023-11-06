@@ -1,5 +1,4 @@
 import { expect } from 'chai';
-import * as cheerio from 'cheerio';
 import { loadFixture } from './test-utils.js';
 
 describe('Errors in JavaScript', () => {
@@ -12,6 +11,9 @@ describe('Errors in JavaScript', () => {
 	before(async () => {
 		fixture = await loadFixture({
 			root: './fixtures/error-bad-js',
+			vite: {
+				logLevel: 'silent',
+			},
 		});
 		devServer = await fixture.startDevServer();
 	});

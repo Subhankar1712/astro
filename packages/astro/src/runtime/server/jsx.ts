@@ -1,22 +1,38 @@
 /* eslint-disable no-console */
-import { SSRResult } from '../../@types/astro.js';
-import { AstroJSX, isVNode } from '../../jsx-runtime/index.js';
+import type { SSRResult } from '../../@types/astro.js';
+import { AstroJSX, isVNode, type AstroVNode } from '../../jsx-runtime/index.js';
 import {
-	escapeHTML,
-	HTMLBytes,
 	HTMLString,
+	escapeHTML,
 	markHTMLString,
-	renderComponent,
-	RenderInstruction,
 	renderToString,
 	spreadAttributes,
 	voidElementNames,
 } from './index.js';
-import { HTMLParts } from './render/common.js';
+import { renderComponentToString } from './render/component.js';
 
 const ClientOnlyPlaceholder = 'astro-client-only';
 
-const skipAstroJSXCheck = new WeakSet();
+class Skip {
+	count: number;
+	constructor(public vnode: AstroVNode) {
+		this.count = 0;
+	}
+
+	increment() {
+		this.count++;
+	}
+
+	haveNoTried() {
+		return this.count === 0;
+	}
+
+	isCompleted() {
+		return this.count > 2;
+	}
+	static symbol = Symbol('astro:jsx:skip');
+}
+
 let originalConsoleError: any;
 let consoleFilterRefs = 0;
 
@@ -29,6 +45,8 @@ export async function renderJSX(result: SSRResult, vnode: any): Promise<any> {
 			return vnode;
 		case typeof vnode === 'string':
 			return markHTMLString(escapeHTML(vnode));
+		case typeof vnode === 'function':
+			return vnode;
 		case !vnode && vnode !== 0:
 			return '';
 		case Array.isArray(vnode):
@@ -36,10 +54,27 @@ export async function renderJSX(result: SSRResult, vnode: any): Promise<any> {
 				(await Promise.all(vnode.map((v: any) => renderJSX(result, v)))).join('')
 			);
 	}
+
+	// Extract the skip from the props, if we've already attempted a previous render
+	let skip: Skip;
+	if (vnode.props) {
+		if (vnode.props[Skip.symbol]) {
+			skip = vnode.props[Skip.symbol];
+		} else {
+			skip = new Skip(vnode);
+		}
+	} else {
+		skip = new Skip(vnode);
+	}
+
+	return renderJSXVNode(result, vnode, skip);
+}
+
+async function renderJSXVNode(result: SSRResult, vnode: AstroVNode, skip: Skip): Promise<any> {
 	if (isVNode(vnode)) {
 		switch (true) {
 			case !vnode.type: {
-				throw new Error(`Unable to render ${result._metadata.pathname} because it contains an undefined Component!
+				throw new Error(`Unable to render ${result.pathname} because it contains an undefined Component!
 Did you forget to import the component or is it possible there is a typo?`);
 			}
 			case (vnode.type as any) === Symbol.for('astro:fragment'):
@@ -48,16 +83,18 @@ Did you forget to import the component or is it possible there is a typo?`);
 				let props: Record<string, any> = {};
 				let slots: Record<string, any> = {};
 				for (const [key, value] of Object.entries(vnode.props ?? {})) {
-					if (
-						key === 'children' ||
-						(value && typeof value === 'object' && (value as any)['$$slot'])
-					) {
+					if (key === 'children' || (value && typeof value === 'object' && value['$$slot'])) {
 						slots[key === 'children' ? 'default' : key] = () => renderJSX(result, value);
 					} else {
 						props[key] = value;
 					}
 				}
-				return markHTMLString(await renderToString(result, vnode.type as any, props, slots));
+				const str = await renderToString(result, vnode.type as any, props, slots);
+				if (str instanceof Response) {
+					throw str;
+				}
+				const html = markHTMLString(str);
+				return html;
 			}
 			case !vnode.type && (vnode.type as any) !== 0:
 				return '';
@@ -67,25 +104,35 @@ Did you forget to import the component or is it possible there is a typo?`);
 
 		if (vnode.type) {
 			if (typeof vnode.type === 'function' && (vnode.type as any)['astro:renderer']) {
-				skipAstroJSXCheck.add(vnode.type);
+				skip.increment();
 			}
 			if (typeof vnode.type === 'function' && vnode.props['server:root']) {
 				const output = await vnode.type(vnode.props ?? {});
 				return await renderJSX(result, output);
 			}
-			if (typeof vnode.type === 'function' && !skipAstroJSXCheck.has(vnode.type)) {
-				useConsoleFilter();
-				try {
-					const output = await vnode.type(vnode.props ?? {});
-					if (output && output[AstroJSX]) {
-						return await renderJSX(result, output);
-					} else if (!output) {
-						return await renderJSX(result, output);
+			if (typeof vnode.type === 'function') {
+				if (skip.haveNoTried() || skip.isCompleted()) {
+					useConsoleFilter();
+					try {
+						const output = await vnode.type(vnode.props ?? {});
+						let renderResult: any;
+						if (output?.[AstroJSX]) {
+							renderResult = await renderJSXVNode(result, output, skip);
+							return renderResult;
+						} else if (!output) {
+							renderResult = await renderJSXVNode(result, output, skip);
+							return renderResult;
+						}
+					} catch (e: unknown) {
+						if (skip.isCompleted()) {
+							throw e;
+						}
+						skip.increment();
+					} finally {
+						finishUsingConsoleFilter();
 					}
-				} catch (e) {
-					skipAstroJSXCheck.add(vnode.type);
-				} finally {
-					finishUsingConsoleFilter();
+				} else {
+					skip.increment();
 				}
 			}
 
@@ -127,9 +174,10 @@ Did you forget to import the component or is it possible there is a typo?`);
 			}
 			await Promise.all(slotPromises);
 
-			let output: string | AsyncIterable<string | HTMLBytes | RenderInstruction>;
+			props[Skip.symbol] = skip;
+			let output: string;
 			if (vnode.type === ClientOnlyPlaceholder && vnode.props['client:only']) {
-				output = await renderComponent(
+				output = await renderComponentToString(
 					result,
 					vnode.props['client:display-name'] ?? '',
 					null,
@@ -137,7 +185,7 @@ Did you forget to import the component or is it possible there is a typo?`);
 					slots
 				);
 			} else {
-				output = await renderComponent(
+				output = await renderComponentToString(
 					result,
 					typeof vnode.type === 'function' ? vnode.type.name : vnode.type,
 					vnode.type,
@@ -145,15 +193,7 @@ Did you forget to import the component or is it possible there is a typo?`);
 					slots
 				);
 			}
-			if (typeof output !== 'string' && Symbol.asyncIterator in output) {
-				let parts = new HTMLParts();
-				for await (const chunk of output) {
-					parts.append(chunk, result);
-				}
-				return markHTMLString(parts.toString());
-			} else {
-				return markHTMLString(output);
-			}
+			return markHTMLString(output);
 		}
 	}
 	// numbers, plain objects, etc
@@ -169,9 +209,25 @@ async function renderElement(
 		`<${tag}${spreadAttributes(props)}${markHTMLString(
 			(children == null || children == '') && voidElementNames.test(tag)
 				? `/>`
-				: `>${children == null ? '' : await renderJSX(result, children)}</${tag}>`
+				: `>${
+						children == null ? '' : await renderJSX(result, prerenderElementChildren(tag, children))
+				  }</${tag}>`
 		)}`
 	);
+}
+
+/**
+ * Pre-render the children with the given `tag` information
+ */
+function prerenderElementChildren(tag: string, children: any) {
+	// For content within <style> and <script> tags that are plain strings, e.g. injected
+	// by remark/rehype plugins, or if a user explicitly does `<script>{'...'}</script>`,
+	// we mark it as an HTML string to prevent the content from being HTML-escaped.
+	if (typeof children === 'string' && (tag === 'style' || tag === 'script')) {
+		return markHTMLString(children);
+	} else {
+		return children;
+	}
 }
 
 /**
@@ -186,11 +242,9 @@ function useConsoleFilter() {
 	consoleFilterRefs++;
 
 	if (!originalConsoleError) {
-		// eslint-disable-next-line no-console
 		originalConsoleError = console.error;
 
 		try {
-			// eslint-disable-next-line no-console
 			console.error = filteredConsoleError;
 		} catch (error) {
 			// If we're unable to hook `console.error`, just accept it

@@ -30,7 +30,7 @@ describe('astro/src/core/cookies', () => {
 			expect(cookies.get('foo').value).to.equal('bar');
 
 			cookies.delete('foo');
-			expect(cookies.get('foo').value).to.equal(undefined);
+			expect(cookies.get('foo')).to.equal(undefined);
 		});
 
 		it('calling cookies.has() after returns false', () => {
@@ -55,6 +55,17 @@ describe('astro/src/core/cookies', () => {
 			let headers = Array.from(cookies.headers());
 			expect(headers).to.have.a.lengthOf(1);
 			expect(headers[0]).to.match(/Path=\/subpath\//);
+		});
+
+		it('can provide a domain', () => {
+			let req = new Request('http://example.com/');
+			let cookies = new AstroCookies(req);
+			cookies.delete('foo', {
+				domain: '.example.com',
+			});
+			let headers = Array.from(cookies.headers());
+			expect(headers).to.have.a.lengthOf(1);
+			expect(headers[0]).to.match(/Domain=\.example\.com/);
 		});
 	});
 });

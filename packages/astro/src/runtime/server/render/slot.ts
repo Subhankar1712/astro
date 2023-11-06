@@ -1,35 +1,71 @@
 import type { SSRResult } from '../../../@types/astro.js';
-import type { RenderInstruction } from './types.js';
+import type { renderTemplate } from './astro/render-template.js';
+import type { RenderInstruction } from './instruction.js';
 
 import { HTMLString, markHTMLString } from '../escape.js';
 import { renderChild } from './any.js';
+import { chunkToString, type RenderDestination, type RenderInstance } from './common.js';
+
+type RenderTemplateResult = ReturnType<typeof renderTemplate>;
+export type ComponentSlots = Record<string, ComponentSlotValue>;
+export type ComponentSlotValue = (
+	result: SSRResult
+) => RenderTemplateResult | Promise<RenderTemplateResult>;
+
+const slotString = Symbol.for('astro:slot-string');
 
 export class SlotString extends HTMLString {
 	public instructions: null | RenderInstruction[];
+	public [slotString]: boolean;
 	constructor(content: string, instructions: null | RenderInstruction[]) {
 		super(content);
 		this.instructions = instructions;
+		this[slotString] = true;
 	}
 }
 
-export async function renderSlot(_result: any, slotted: string, fallback?: any): Promise<string> {
-	if (slotted) {
-		let iterator = renderChild(slotted);
-		let content = '';
-		let instructions: null | RenderInstruction[] = null;
-		for await (const chunk of iterator) {
-			if ((chunk as any).type === 'directive') {
+export function isSlotString(str: string): str is any {
+	return !!(str as any)[slotString];
+}
+
+export function renderSlot(
+	result: SSRResult,
+	slotted: ComponentSlotValue | RenderTemplateResult,
+	fallback?: ComponentSlotValue | RenderTemplateResult
+): RenderInstance {
+	if (!slotted && fallback) {
+		return renderSlot(result, fallback);
+	}
+	return {
+		async render(destination) {
+			await renderChild(destination, typeof slotted === 'function' ? slotted(result) : slotted);
+		},
+	};
+}
+
+export async function renderSlotToString(
+	result: SSRResult,
+	slotted: ComponentSlotValue | RenderTemplateResult,
+	fallback?: ComponentSlotValue | RenderTemplateResult
+): Promise<string> {
+	let content = '';
+	let instructions: null | RenderInstruction[] = null;
+	const temporaryDestination: RenderDestination = {
+		write(chunk) {
+			if (chunk instanceof Response) return;
+			if (typeof chunk === 'object' && 'type' in chunk && typeof chunk.type === 'string') {
 				if (instructions === null) {
 					instructions = [];
 				}
 				instructions.push(chunk);
 			} else {
-				content += chunk;
+				content += chunkToString(result, chunk);
 			}
-		}
-		return markHTMLString(new SlotString(content, instructions));
-	}
-	return fallback;
+		},
+	};
+	const renderInstance = renderSlot(result, slotted, fallback);
+	await renderInstance.render(temporaryDestination);
+	return markHTMLString(new SlotString(content, instructions));
 }
 
 interface RenderSlotsResult {
@@ -37,13 +73,16 @@ interface RenderSlotsResult {
 	children: Record<string, string>;
 }
 
-export async function renderSlots(result: SSRResult, slots: any = {}): Promise<RenderSlotsResult> {
+export async function renderSlots(
+	result: SSRResult,
+	slots: ComponentSlots = {}
+): Promise<RenderSlotsResult> {
 	let slotInstructions: RenderSlotsResult['slotInstructions'] = null;
 	let children: RenderSlotsResult['children'] = {};
 	if (slots) {
 		await Promise.all(
 			Object.entries(slots).map(([key, value]) =>
-				renderSlot(result, value as string).then((output: any) => {
+				renderSlotToString(result, value).then((output: any) => {
 					if (output.instructions) {
 						if (slotInstructions === null) {
 							slotInstructions = [];

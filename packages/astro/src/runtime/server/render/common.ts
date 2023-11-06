@@ -1,13 +1,46 @@
-import type { SSRResult } from '../../../@types/astro';
-import type { RenderInstruction } from './types.js';
+import type { SSRResult } from '../../../@types/astro.js';
+import type { RenderInstruction } from './instruction.js';
 
-import { HTMLBytes, markHTMLString } from '../escape.js';
+import { HTMLBytes, HTMLString, markHTMLString } from '../escape.js';
 import {
 	determineIfNeedsHydrationScript,
 	determinesIfNeedsDirectiveScript,
 	getPrescripts,
-	PrescriptType,
+	type PrescriptType,
 } from '../scripts.js';
+import { renderAllHeadContent } from './head.js';
+import { isRenderInstruction } from './instruction.js';
+import { isSlotString, type SlotString } from './slot.js';
+
+/**
+ * Possible chunk types to be written to the destination, and it'll
+ * handle stringifying them at the end.
+ *
+ * NOTE: Try to reduce adding new types here. If possible, serialize
+ * the custom types to a string in `renderChild` in `any.ts`.
+ */
+export type RenderDestinationChunk =
+	| string
+	| HTMLBytes
+	| HTMLString
+	| SlotString
+	| ArrayBufferView
+	| RenderInstruction
+	| Response;
+
+export interface RenderDestination {
+	/**
+	 * Any rendering logic should call this to construct the HTML output.
+	 * See the `chunk` parameter for possible writable values.
+	 */
+	write(chunk: RenderDestinationChunk): void;
+}
+
+export interface RenderInstance {
+	render: RenderFunction;
+}
+
+export type RenderFunction = (destination: RenderDestination) => Promise<void> | void;
 
 export const Fragment = Symbol.for('astro:fragment');
 export const Renderer = Symbol.for('astro:renderer');
@@ -18,83 +51,85 @@ export const decoder = new TextDecoder();
 // Rendering produces either marked strings of HTML or instructions for hydration.
 // These directive instructions bubble all the way up to renderPage so that we
 // can ensure they are added only once, and as soon as possible.
-export function stringifyChunk(result: SSRResult, chunk: string | RenderInstruction) {
-	switch ((chunk as any).type) {
-		case 'directive': {
-			const { hydration } = chunk as RenderInstruction;
-			let needsHydrationScript = hydration && determineIfNeedsHydrationScript(result);
-			let needsDirectiveScript =
-				hydration && determinesIfNeedsDirectiveScript(result, hydration.directive);
+function stringifyChunk(
+	result: SSRResult,
+	chunk: string | HTMLString | SlotString | RenderInstruction
+): string {
+	if (isRenderInstruction(chunk)) {
+		const instruction = chunk;
+		switch (instruction.type) {
+			case 'directive': {
+				const { hydration } = instruction;
+				let needsHydrationScript = hydration && determineIfNeedsHydrationScript(result);
+				let needsDirectiveScript =
+					hydration && determinesIfNeedsDirectiveScript(result, hydration.directive);
 
-			let prescriptType: PrescriptType = needsHydrationScript
-				? 'both'
-				: needsDirectiveScript
-				? 'directive'
-				: null;
-			if (prescriptType) {
-				let prescripts = getPrescripts(prescriptType, hydration.directive);
-				return markHTMLString(prescripts);
-			} else {
-				return '';
+				let prescriptType: PrescriptType = needsHydrationScript
+					? 'both'
+					: needsDirectiveScript
+					? 'directive'
+					: null;
+				if (prescriptType) {
+					let prescripts = getPrescripts(result, prescriptType, hydration.directive);
+					return markHTMLString(prescripts);
+				} else {
+					return '';
+				}
+			}
+			case 'head': {
+				if (result._metadata.hasRenderedHead || result.partial) {
+					return '';
+				}
+				return renderAllHeadContent(result);
+			}
+			case 'maybe-head': {
+				if (result._metadata.hasRenderedHead || result._metadata.headInTree || result.partial) {
+					return '';
+				}
+				return renderAllHeadContent(result);
+			}
+			default: {
+				throw new Error(`Unknown chunk type: ${(chunk as any).type}`);
 			}
 		}
-		default: {
-			return chunk.toString();
+	} else if (chunk instanceof Response) {
+		return '';
+	} else if (isSlotString(chunk as string)) {
+		let out = '';
+		const c = chunk as SlotString;
+		if (c.instructions) {
+			for (const instr of c.instructions) {
+				out += stringifyChunk(result, instr);
+			}
 		}
+		out += chunk.toString();
+		return out;
 	}
+
+	return chunk.toString();
 }
 
-export class HTMLParts {
-	public parts: Array<HTMLBytes | string>;
-	constructor() {
-		this.parts = [];
-	}
-	append(part: string | HTMLBytes | RenderInstruction, result: SSRResult) {
-		if (ArrayBuffer.isView(part)) {
-			this.parts.push(part);
-		} else {
-			this.parts.push(stringifyChunk(result, part));
-		}
-	}
-	toString() {
-		let html = '';
-		for (const part of this.parts) {
-			if (ArrayBuffer.isView(part)) {
-				html += decoder.decode(part);
-			} else {
-				html += part;
-			}
-		}
-		return html;
-	}
-	toArrayBuffer() {
-		this.parts.forEach((part, i) => {
-			if (!ArrayBuffer.isView(part)) {
-				this.parts[i] = encoder.encode(String(part));
-			}
-		});
-		return concatUint8Arrays(this.parts as Uint8Array[]);
+export function chunkToString(result: SSRResult, chunk: Exclude<RenderDestinationChunk, Response>) {
+	if (ArrayBuffer.isView(chunk)) {
+		return decoder.decode(chunk);
+	} else {
+		return stringifyChunk(result, chunk);
 	}
 }
 
 export function chunkToByteArray(
 	result: SSRResult,
-	chunk: string | HTMLBytes | RenderInstruction
+	chunk: Exclude<RenderDestinationChunk, Response>
 ): Uint8Array {
-	if (chunk instanceof Uint8Array) {
+	if (ArrayBuffer.isView(chunk)) {
 		return chunk as Uint8Array;
+	} else {
+		// `stringifyChunk` might return a HTMLString, call `.toString()` to really ensure it's a string
+		const stringified = stringifyChunk(result, chunk);
+		return encoder.encode(stringified.toString());
 	}
-	return encoder.encode(stringifyChunk(result, chunk));
 }
 
-export function concatUint8Arrays(arrays: Array<Uint8Array>) {
-	let len = 0;
-	arrays.forEach((arr) => (len += arr.length));
-	let merged = new Uint8Array(len);
-	let offset = 0;
-	arrays.forEach((arr) => {
-		merged.set(arr, offset);
-		offset += arr.length;
-	});
-	return merged;
+export function isRenderInstance(obj: unknown): obj is RenderInstance {
+	return !!obj && typeof obj === 'object' && 'render' in obj && typeof obj.render === 'function';
 }

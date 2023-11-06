@@ -17,6 +17,8 @@ describe('react-jsx-export', () => {
 		'default_list_export',
 		'renamed_list_export',
 		'list_as_default_export',
+		'list_export_test_component',
+		'hoc_default_export',
 	];
 
 	const reactInvalidHookWarning =
@@ -45,7 +47,7 @@ describe('react-jsx-export', () => {
 		});
 	});
 
-	it('Can not output React Invalid Hook warning', async () => {
+	it('Cannot output React Invalid Hook warning', async () => {
 		expect(logs.every((log) => log.message.indexOf(reactInvalidHookWarning) === -1)).to.be.true;
 	});
 });

@@ -7,10 +7,10 @@ export interface AstroVNode {
 	[Renderer]: string;
 	[AstroJSX]: boolean;
 	type: string | ((...args: any) => any);
-	props: Record<string, any>;
+	props: Record<string | symbol, any>;
 }
 
-const toSlotName = (str: string) => str.trim().replace(/[-_]([a-z])/g, (_, w) => w.toUpperCase());
+const toSlotName = (slotAttr: string) => slotAttr;
 
 export function isVNode(vnode: any): vnode is AstroVNode {
 	return vnode && typeof vnode === 'object' && vnode[AstroJSX];
@@ -85,4 +85,4 @@ function createVNode(type: any, props: Record<string, any>) {
 	return vnode;
 }
 
-export { AstroJSX, createVNode as jsx, createVNode as jsxs, createVNode as jsxDEV, Fragment };
+export { AstroJSX, Fragment, createVNode as jsx, createVNode as jsxDEV, createVNode as jsxs };

@@ -1,36 +1,46 @@
-import type { AstroSettings } from '../@types/astro';
-import type { LogOptions } from './logger/core';
+import type { AstroSettings } from '../@types/astro.js';
+import type { Logger } from './logger/core.js';
 
-import fs from 'fs';
-import { createRequire } from 'module';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import nodeFs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import * as vite from 'vite';
+import { crawlFrameworkPkgs } from 'vitefu';
+import astroAssetsPlugin from '../assets/vite-plugin-assets.js';
+import {
+	astroContentAssetPropagationPlugin,
+	astroContentImportPlugin,
+	astroContentVirtualModPlugin,
+} from '../content/index.js';
+import astroTransitions from '../transitions/vite-plugin-transitions.js';
 import astroPostprocessVitePlugin from '../vite-plugin-astro-postprocess/index.js';
-import astroViteServerPlugin from '../vite-plugin-astro-server/index.js';
+import { vitePluginAstroServer } from '../vite-plugin-astro-server/index.js';
 import astroVitePlugin from '../vite-plugin-astro/index.js';
 import configAliasVitePlugin from '../vite-plugin-config-alias/index.js';
+import astroDevOverlay from '../vite-plugin-dev-overlay/vite-plugin-dev-overlay.js';
 import envVitePlugin from '../vite-plugin-env/index.js';
+import astroHeadPlugin from '../vite-plugin-head/index.js';
 import htmlVitePlugin from '../vite-plugin-html/index.js';
+import { astroInjectEnvTsPlugin } from '../vite-plugin-inject-env-ts/index.js';
 import astroIntegrationsContainerPlugin from '../vite-plugin-integrations-container/index.js';
-import jsxVitePlugin from '../vite-plugin-jsx/index.js';
-import legacyMarkdownVitePlugin from '../vite-plugin-markdown-legacy/index.js';
+import astroLoadFallbackPlugin from '../vite-plugin-load-fallback/index.js';
 import markdownVitePlugin from '../vite-plugin-markdown/index.js';
+import mdxVitePlugin from '../vite-plugin-mdx/index.js';
+import astroScannerPlugin from '../vite-plugin-scanner/index.js';
 import astroScriptsPlugin from '../vite-plugin-scripts/index.js';
 import astroScriptsPageSSRPlugin from '../vite-plugin-scripts/page-ssr.js';
-import { createCustomViteLogger } from './errors.js';
-import { resolveDependency } from './util.js';
-
-// note: ssr is still an experimental API hence the type omission from `vite`
-export type ViteConfigWithSSR = vite.InlineConfig & { ssr?: vite.SSROptions };
+import { vitePluginSSRManifest } from '../vite-plugin-ssr-manifest/index.js';
+import { joinPaths } from './path.js';
 
 interface CreateViteOptions {
 	settings: AstroSettings;
-	logging: LogOptions;
+	logger: Logger;
 	mode: 'dev' | 'build' | string;
+	// will be undefined when using `getViteConfig`
+	command?: 'dev' | 'build';
+	fs?: typeof nodeFs;
 }
 
-const ALWAYS_NOEXTERNAL = new Set([
+const ALWAYS_NOEXTERNAL = [
 	// This is only because Vite's native ESM doesn't resolve "exports" correctly.
 	'astro',
 	// Vite fails on nested `.astro` imports without bundling
@@ -40,60 +50,100 @@ const ALWAYS_NOEXTERNAL = new Set([
 	'@nanostores/preact',
 	// fontsource packages are CSS that need to be processed
 	'@fontsource/*',
-]);
+];
 
-function getSsrNoExternalDeps(projectRoot: URL): string[] {
-	let noExternalDeps = [];
-	for (const dep of ALWAYS_NOEXTERNAL) {
-		try {
-			resolveDependency(dep, projectRoot);
-			noExternalDeps.push(dep);
-		} catch {
-			// ignore dependency if *not* installed / present in your project
-			// prevents hard error from Vite!
-		}
-	}
-	return noExternalDeps;
-}
+// These specifiers are usually dependencies written in CJS, but loaded through Vite's transform
+// pipeline, which Vite doesn't support in development time. This hardcoded list temporarily
+// fixes things until Vite can properly handle them, or when they support ESM.
+const ONLY_DEV_EXTERNAL = [
+	// Imported by `@astrojs/prism` which exposes `<Prism/>` that is processed by Vite
+	'prismjs/components/index.js',
+	// Imported by `astro/assets` -> `packages/astro/src/core/logger/core.ts`
+	'string-width',
+];
 
 /** Return a common starting point for all Vite actions */
 export async function createVite(
-	commandConfig: ViteConfigWithSSR,
-	{ settings, logging, mode }: CreateViteOptions
-): Promise<ViteConfigWithSSR> {
-	const thirdPartyAstroPackages = await getAstroPackages(settings);
+	commandConfig: vite.InlineConfig,
+	{ settings, logger, mode, command, fs = nodeFs }: CreateViteOptions
+): Promise<vite.InlineConfig> {
+	const astroPkgsConfig = await crawlFrameworkPkgs({
+		root: fileURLToPath(settings.config.root),
+		isBuild: mode === 'build',
+		viteUserConfig: settings.config.vite,
+		isFrameworkPkgByJson(pkgJson) {
+			// Certain packages will trigger the checks below, but need to be external. A common example are SSR adapters
+			// for node-based platforms, as we need to control the order of the import paths to make sure polyfills are applied in time.
+			if (pkgJson?.astro?.external === true) {
+				return false;
+			}
+
+			return (
+				// Attempt: package relies on `astro`. ✅ Definitely an Astro package
+				pkgJson.peerDependencies?.astro ||
+				pkgJson.dependencies?.astro ||
+				// Attempt: package is tagged with `astro` or `astro-component`. ✅ Likely a community package
+				pkgJson.keywords?.includes('astro') ||
+				pkgJson.keywords?.includes('astro-component') ||
+				// Attempt: package is named `astro-something` or `@scope/astro-something`. ✅ Likely a community package
+				/^(@[^\/]+\/)?astro\-/.test(pkgJson.name)
+			);
+		},
+		isFrameworkPkgByName(pkgName) {
+			const isNotAstroPkg = isCommonNotAstro(pkgName);
+			if (isNotAstroPkg) {
+				return false;
+			} else {
+				return undefined;
+			}
+		},
+	});
+
 	// Start with the Vite configuration that Astro core needs
-	const commonConfig: ViteConfigWithSSR = {
+	const commonConfig: vite.InlineConfig = {
+		// Tell Vite not to combine config from vite.config.js with our provided inline config
+		configFile: false,
 		cacheDir: fileURLToPath(new URL('./node_modules/.vite/', settings.config.root)), // using local caches allows Astro to be used in monorepos, etc.
 		clearScreen: false, // we want to control the output, not Vite
 		logLevel: 'warn', // log warnings and errors only
 		appType: 'custom',
 		optimizeDeps: {
 			entries: ['src/**/*'],
-			exclude: ['node-fetch'],
+			exclude: ['astro', 'node-fetch'],
 		},
 		plugins: [
 			configAliasVitePlugin({ settings }),
-			astroVitePlugin({ settings, logging }),
+			astroLoadFallbackPlugin({ fs, root: settings.config.root }),
+			astroVitePlugin({ settings, logger }),
 			astroScriptsPlugin({ settings }),
 			// The server plugin is for dev only and having it run during the build causes
 			// the build to run very slow as the filewatcher is triggered often.
-			mode !== 'build' && astroViteServerPlugin({ settings, logging }),
+			mode !== 'build' && vitePluginAstroServer({ settings, logger, fs }),
 			envVitePlugin({ settings }),
-			settings.config.legacy.astroFlavoredMarkdown
-				? legacyMarkdownVitePlugin({ settings, logging })
-				: markdownVitePlugin({ settings, logging }),
+			markdownVitePlugin({ settings, logger }),
 			htmlVitePlugin(),
-			jsxVitePlugin({ settings, logging }),
-			astroPostprocessVitePlugin({ settings }),
-			astroIntegrationsContainerPlugin({ settings, logging }),
+			mdxVitePlugin({ settings, logger }),
+			astroPostprocessVitePlugin(),
+			astroIntegrationsContainerPlugin({ settings, logger }),
 			astroScriptsPageSSRPlugin({ settings }),
+			astroHeadPlugin(),
+			astroScannerPlugin({ settings, logger }),
+			astroInjectEnvTsPlugin({ settings, logger, fs }),
+			astroContentVirtualModPlugin({ settings }),
+			astroContentImportPlugin({ fs, settings }),
+			astroContentAssetPropagationPlugin({ mode, settings }),
+			vitePluginSSRManifest(),
+			astroAssetsPlugin({ settings, logger, mode }),
+			astroTransitions(),
+			astroDevOverlay({ settings, logger }),
 		],
 		publicDir: fileURLToPath(settings.config.publicDir),
 		root: fileURLToPath(settings.config.root),
-		envPrefix: 'PUBLIC_',
+		envPrefix: settings.config.vite?.envPrefix ?? 'PUBLIC_',
 		define: {
-			'import.meta.env.SITE': settings.config.site ? `'${settings.config.site}'` : 'undefined',
+			'import.meta.env.SITE': settings.config.site
+				? JSON.stringify(settings.config.site)
+				: 'undefined',
 		},
 		server: {
 			hmr:
@@ -109,9 +159,6 @@ export async function createVite(
 				ignored: mode === 'build' ? ['**'] : undefined,
 			},
 		},
-		css: {
-			postcss: settings.config.style.postcss || {},
-		},
 		resolve: {
 			alias: [
 				{
@@ -123,19 +170,40 @@ export async function createVite(
 				{
 					// Typings are imported from 'astro' (e.g. import { Type } from 'astro')
 					find: /^astro$/,
-					replacement: fileURLToPath(new URL('../@types/astro', import.meta.url)),
+					replacement: fileURLToPath(new URL('../@types/astro.js', import.meta.url)),
+				},
+				{
+					find: 'astro:middleware',
+					replacement: 'astro/middleware/namespace',
+				},
+				{
+					find: 'astro:components',
+					replacement: 'astro/components',
 				},
 			],
 			conditions: ['astro'],
+			// Astro imports in third-party packages should use the same version as root
+			dedupe: ['astro'],
 		},
 		ssr: {
-			noExternal: [...getSsrNoExternalDeps(settings.config.root), ...thirdPartyAstroPackages],
-			// shiki is imported by Code.astro, which is no-externalized (processed by Vite).
-			// However, shiki's deps are in CJS and trips up Vite's dev SSR transform, externalize
-			// shiki to load it with node instead.
-			external: mode === 'dev' ? ['shiki'] : [],
+			noExternal: [...ALWAYS_NOEXTERNAL, ...astroPkgsConfig.ssr.noExternal],
+			external: [...(mode === 'dev' ? ONLY_DEV_EXTERNAL : []), ...astroPkgsConfig.ssr.external],
 		},
 	};
+
+	// If the user provides a custom assets prefix, make sure assets handled by Vite
+	// are prefixed with it too. This uses one of it's experimental features, but it
+	// has been stable for a long time now.
+	const assetsPrefix = settings.config.build.assetsPrefix;
+	if (assetsPrefix) {
+		commonConfig.experimental = {
+			renderBuiltUrl(filename, { type }) {
+				if (type === 'asset') {
+					return joinPaths(assetsPrefix, filename);
+				}
+			},
+		};
+	}
 
 	// Merge configs: we merge vite configuration objects together in the following order,
 	// where future values will override previous values.
@@ -144,151 +212,40 @@ export async function createVite(
 	//   3. integration-provided vite config, via the `config:setup` hook
 	//   4. command vite config, passed as the argument to this function
 	let result = commonConfig;
-	result = vite.mergeConfig(result, settings.config.vite || {});
-	result = vite.mergeConfig(result, commandConfig);
-	if (result.plugins) {
-		sortPlugins(result.plugins);
-	}
+	// PR #6238 Calls user integration `astro:config:setup` hooks when running `astro sync`.
+	// Without proper filtering, user integrations may run twice unexpectedly:
+	// - with `command` set to `build/dev` (src/core/build/index.ts L72)
+	// - and again in the `sync` module to generate `Content Collections` (src/core/sync/index.ts L36)
+	// We need to check if the command is `build` or `dev` before merging the user-provided vite config.
+	// We also need to filter out the plugins that are not meant to be applied to the current command:
+	// - If the command is `build`, we filter out the plugins that are meant to be applied for `serve`.
+	// - If the command is `dev`, we filter out the plugins that are meant to be applied for `build`.
+	if (command && settings.config.vite?.plugins) {
+		let { plugins, ...rest } = settings.config.vite;
+		const applyToFilter = command === 'build' ? 'serve' : 'build';
+		const applyArgs = [
+			{ ...settings.config.vite, mode },
+			{ command: command === 'dev' ? 'serve' : command, mode },
+		];
+		// @ts-expect-error ignore TS2589: Type instantiation is excessively deep and possibly infinite.
+		plugins = plugins.flat(Infinity).filter((p) => {
+			if (!p || p?.apply === applyToFilter) {
+				return false;
+			}
 
-	result.customLogger = createCustomViteLogger(result.logLevel ?? 'warn');
+			if (typeof p.apply === 'function') {
+				return p.apply(applyArgs[0], applyArgs[1]);
+			}
+
+			return true;
+		});
+		result = vite.mergeConfig(result, { ...rest, plugins });
+	} else {
+		result = vite.mergeConfig(result, settings.config.vite || {});
+	}
+	result = vite.mergeConfig(result, commandConfig);
 
 	return result;
-}
-
-function isVitePlugin(plugin: vite.PluginOption): plugin is vite.Plugin {
-	return Boolean(plugin?.hasOwnProperty('name'));
-}
-
-function findPluginIndexByName(pluginOptions: vite.PluginOption[], name: string): number {
-	return pluginOptions.findIndex(function (pluginOption) {
-		// Use isVitePlugin to ignore nulls, booleans, promises, and arrays
-		// CAUTION: could be a problem if a plugin we're searching for becomes async!
-		return isVitePlugin(pluginOption) && pluginOption.name === name;
-	});
-}
-
-function sortPlugins(pluginOptions: vite.PluginOption[]) {
-	// HACK: move mdxPlugin to top because it needs to run before internal JSX plugin
-	const mdxPluginIndex = findPluginIndexByName(pluginOptions, '@mdx-js/rollup');
-	if (mdxPluginIndex === -1) return;
-	const jsxPluginIndex = findPluginIndexByName(pluginOptions, 'astro:jsx');
-	const mdxPlugin = pluginOptions[mdxPluginIndex];
-	pluginOptions.splice(mdxPluginIndex, 1);
-	pluginOptions.splice(jsxPluginIndex, 0, mdxPlugin);
-}
-
-// Scans `projectRoot` for third-party Astro packages that could export an `.astro` file
-// `.astro` files need to be built by Vite, so these should use `noExternal`
-async function getAstroPackages(settings: AstroSettings): Promise<string[]> {
-	const { astroPackages } = new DependencyWalker(settings.config.root);
-	return astroPackages;
-}
-
-/**
- * Recursively walk a project’s dependency tree trying to find Astro packages.
- * - If the current node is an Astro package, we continue walking its child dependencies.
- * - If the current node is not an Astro package, we bail out of walking that branch.
- * This assumes it is unlikely for Astro packages to be dependencies of packages that aren’t
- * themselves also Astro packages.
- */
-class DependencyWalker {
-	private readonly require: NodeRequire;
-	private readonly astroDeps = new Set<string>();
-	private readonly nonAstroDeps = new Set<string>();
-
-	constructor(root: URL) {
-		const pkgUrl = new URL('./package.json', root);
-		this.require = createRequire(pkgUrl);
-		const pkgPath = fileURLToPath(pkgUrl);
-		if (!fs.existsSync(pkgPath)) return;
-
-		const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-		const deps = [
-			...Object.keys(pkg.dependencies || {}),
-			...Object.keys(pkg.devDependencies || {}),
-		];
-
-		this.scanDependencies(deps);
-	}
-
-	/** The dependencies we determined were likely to include `.astro` files. */
-	public get astroPackages(): string[] {
-		return Array.from(this.astroDeps);
-	}
-
-	private seen(dep: string): boolean {
-		return this.astroDeps.has(dep) || this.nonAstroDeps.has(dep);
-	}
-
-	/** Try to load a directory’s `package.json` file from the filesystem. */
-	private readPkgJSON(dir: string): PkgJSON | void {
-		try {
-			const filePath = path.join(dir, 'package.json');
-			return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-		} catch (e) {}
-	}
-
-	/** Try to resolve a dependency’s `package.json` even if not a package export. */
-	private resolvePkgJSON(dep: string): PkgJSON | void {
-		try {
-			const pkgJson: PkgJSON = this.require(dep + '/package.json');
-			return pkgJson;
-		} catch (e) {
-			// Most likely error is that the dependency doesn’t include `package.json` in its package `exports`.
-			try {
-				// Walk up from default export until we find `package.json` with name === dep.
-				let dir = path.dirname(this.require.resolve(dep));
-				while (dir) {
-					const pkgJSON = this.readPkgJSON(dir);
-					if (pkgJSON && pkgJSON.name === dep) return pkgJSON;
-
-					const parentDir = path.dirname(dir);
-					if (parentDir === dir) break;
-
-					dir = parentDir;
-				}
-			} catch {
-				// Give up! Who knows where the `package.json` is…
-			}
-		}
-	}
-
-	private scanDependencies(deps: string[]): void {
-		const newDeps: string[] = [];
-		for (const dep of deps) {
-			// Attempt: package is common and not Astro. ❌ Skip these for perf
-			if (isCommonNotAstro(dep)) {
-				this.nonAstroDeps.add(dep);
-				continue;
-			}
-
-			const pkgJson = this.resolvePkgJSON(dep);
-			if (!pkgJson) {
-				this.nonAstroDeps.add(dep);
-				continue;
-			}
-			const { dependencies = {}, peerDependencies = {}, keywords = [] } = pkgJson;
-
-			if (
-				// Attempt: package relies on `astro`. ✅ Definitely an Astro package
-				peerDependencies.astro ||
-				dependencies.astro ||
-				// Attempt: package is tagged with `astro` or `astro-component`. ✅ Likely a community package
-				keywords.includes('astro') ||
-				keywords.includes('astro-component') ||
-				// Attempt: package is named `astro-something` or `@scope/astro-something`. ✅ Likely a community package
-				/^(@[^\/]+\/)?astro\-/.test(dep)
-			) {
-				this.astroDeps.add(dep);
-				// Collect any dependencies of this Astro package we haven’t seen yet.
-				const unknownDependencies = Object.keys(dependencies).filter((d) => !this.seen(d));
-				newDeps.push(...unknownDependencies);
-			} else {
-				this.nonAstroDeps.add(dep);
-			}
-		}
-		if (newDeps.length) this.scanDependencies(newDeps);
-	}
 }
 
 const COMMON_DEPENDENCIES_NOT_ASTRO = [
@@ -342,13 +299,4 @@ function isCommonNotAstro(dep: string): boolean {
 					: dep.substring(dep.lastIndexOf('/') + 1).startsWith(prefix) // check prefix omitting @scope/
 		)
 	);
-}
-
-interface PkgJSON {
-	name: string;
-	dependencies?: Record<string, string>;
-	devDependencies?: Record<string, string>;
-	peerDependencies?: Record<string, string>;
-	keywords?: string[];
-	[key: string]: any;
 }

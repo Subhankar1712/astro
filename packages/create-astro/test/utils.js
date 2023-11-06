@@ -1,50 +1,61 @@
-import { execa } from 'execa';
-import { dirname } from 'path';
+import fs from 'node:fs';
+import { setStdout } from '../dist/index.js';
 import stripAnsi from 'strip-ansi';
-import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-export const testDir = dirname(__filename);
-export const timeout = 5000;
-
-const timeoutError = function (details) {
-	let errorMsg = 'Timed out waiting for create-astro to respond with expected output.';
-	if (details) {
-		errorMsg += '\nLast output: "' + details + '"';
-	}
-	return new Error(errorMsg);
-};
-
-export function promiseWithTimeout(testFn) {
-	return new Promise((resolve, reject) => {
-		let lastStdout;
-		function onStdout(chunk) {
-			lastStdout = stripAnsi(chunk.toString()).trim() || lastStdout;
-		}
-
-		const timeoutEvent = setTimeout(() => {
-			reject(timeoutError(lastStdout));
-		}, timeout);
-		function resolver() {
-			clearTimeout(timeoutEvent);
-			resolve();
-		}
-
-		testFn(resolver, onStdout);
+export function setup() {
+	const ctx = { messages: [] };
+	before(() => {
+		setStdout(
+			Object.assign({}, process.stdout, {
+				write(buf) {
+					ctx.messages.push(stripAnsi(String(buf)).trim());
+					return true;
+				},
+			})
+		);
 	});
-}
+	beforeEach(() => {
+		ctx.messages = [];
+	});
 
-export const PROMPT_MESSAGES = {
-	directory: 'Where would you like to create your new project?',
-	template: 'Which template would you like to use?',
-	typescript: 'How would you like to setup TypeScript?',
-	typescriptSucceed: 'Next steps',
-};
-
-export function setup(args = []) {
-	const { stdout, stdin } = execa('../create-astro.mjs', [...args, '--dryrun'], { cwd: testDir });
 	return {
-		stdin,
-		stdout,
+		messages() {
+			return ctx.messages;
+		},
+		length() {
+			return ctx.messages.length;
+		},
+		hasMessage(content) {
+			return !!ctx.messages.find((msg) => msg.includes(content));
+		},
 	};
 }
+
+const resetEmptyFixture = () =>
+	fs.promises.rm(new URL('./fixtures/empty/tsconfig.json', import.meta.url));
+
+const resetNotEmptyFixture = async () => {
+	const packagePath = new URL('./fixtures/not-empty/package.json', import.meta.url);
+	const tsconfigPath = new URL('./fixtures/not-empty/tsconfig.json', import.meta.url);
+
+	const packageJsonData = JSON.parse(
+		await fs.promises.readFile(packagePath, { encoding: 'utf-8' })
+	);
+	const overriddenPackageJson = Object.assign(packageJsonData, {
+		scripts: {
+			dev: 'astro dev',
+			build: 'astro build',
+			preview: 'astro preview',
+		},
+	});
+
+	return Promise.all([
+		fs.promises.writeFile(packagePath, JSON.stringify(overriddenPackageJson, null, 2), {
+			encoding: 'utf-8',
+		}),
+		fs.promises.writeFile(tsconfigPath, '{}', { encoding: 'utf-8' }),
+	]);
+};
+
+export const resetFixtures = () =>
+	Promise.allSettled([resetEmptyFixture(), resetNotEmptyFixture()]);

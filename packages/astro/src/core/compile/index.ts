@@ -1,3 +1,8 @@
-export type { CompileProps } from './compile';
-export { cachedCompilation, getCachedSource, invalidateCompilation, isCached } from './compile.js';
-export type { TransformStyle } from './types';
+export {
+	cachedCompilation,
+	getCachedCompileResult,
+	invalidateCompilation,
+	isCached,
+} from './cache.js';
+export type { CompileProps, CompileResult } from './compile.js';
+export type { TransformStyle } from './types.js';

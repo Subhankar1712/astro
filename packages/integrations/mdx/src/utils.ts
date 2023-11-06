@@ -1,7 +1,9 @@
+import type { PluggableList } from '@mdx-js/mdx/lib/core.js';
 import type { Options as AcornOpts } from 'acorn';
 import { parse } from 'acorn';
 import type { AstroConfig, SSRError } from 'astro';
 import matter from 'gray-matter';
+import { bold, yellow } from 'kleur/colors';
 import type { MdxjsEsm } from 'mdast-util-mdx';
 
 function appendForwardSlash(path: string) {
@@ -30,7 +32,7 @@ export function getFileInfo(id: string, config: AstroConfig): FileInfo {
 	const isPage = fileId.includes('/pages/');
 	if (isPage) {
 		fileUrl = fileId.replace(/^.*?\/pages\//, sitePathname).replace(/(\/index)?\.mdx$/, '');
-	} else if (url && url.pathname.startsWith(config.root.pathname)) {
+	} else if (url?.pathname.startsWith(config.root.pathname)) {
 		fileUrl = url.pathname.slice(config.root.pathname.length);
 	} else {
 		fileUrl = fileId;
@@ -83,15 +85,24 @@ export function jsToTreeNode(
 	};
 }
 
-// TODO: remove for 1.0
-export function handleExtendsNotSupported(pluginConfig: any) {
-	if (
-		typeof pluginConfig === 'object' &&
-		pluginConfig !== null &&
-		(pluginConfig as any).hasOwnProperty('extends')
-	) {
-		throw new Error(
-			`[MDX] The "extends" plugin option is no longer supported! Astro now extends your project's \`markdown\` plugin configuration by default. To customize this behavior, see the \`extendPlugins\` option instead: https://docs.astro.build/en/guides/integrations-guide/mdx/#extendplugins`
+export function ignoreStringPlugins(plugins: any[]): PluggableList {
+	let validPlugins: PluggableList = [];
+	let hasInvalidPlugin = false;
+	for (const plugin of plugins) {
+		if (typeof plugin === 'string') {
+			console.warn(yellow(`[MDX] ${bold(plugin)} not applied.`));
+			hasInvalidPlugin = true;
+		} else if (Array.isArray(plugin) && typeof plugin[0] === 'string') {
+			console.warn(yellow(`[MDX] ${bold(plugin[0])} not applied.`));
+			hasInvalidPlugin = true;
+		} else {
+			validPlugins.push(plugin);
+		}
+	}
+	if (hasInvalidPlugin) {
+		console.warn(
+			`To inherit Markdown plugins in MDX, please use explicit imports in your config instead of "strings." See Markdown docs: https://docs.astro.build/en/guides/markdown-content/#markdown-plugins`
 		);
 	}
+	return validPlugins;
 }

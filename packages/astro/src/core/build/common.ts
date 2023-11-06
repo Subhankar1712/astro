@@ -1,13 +1,17 @@
-import npath from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
-import type { AstroConfig, RouteType } from '../../@types/astro';
+import npath from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import type { AstroConfig, RouteType } from '../../@types/astro.js';
 import { appendForwardSlash } from '../../core/path.js';
 
 const STATUS_CODE_PAGES = new Set(['/404', '/500']);
 const FALLBACK_OUT_DIR_NAME = './.astro/';
 
 function getOutRoot(astroConfig: AstroConfig): URL {
-	return new URL('./', astroConfig.outDir);
+	if (astroConfig.output === 'static') {
+		return new URL('./', astroConfig.outDir);
+	} else {
+		return new URL('./', astroConfig.build.client);
+	}
 }
 
 export function getOutFolder(
@@ -22,6 +26,7 @@ export function getOutFolder(
 		case 'endpoint':
 			return new URL('.' + appendForwardSlash(npath.dirname(pathname)), outRoot);
 		case 'page':
+		case 'redirect':
 			switch (astroConfig.build.format) {
 				case 'directory': {
 					if (STATUS_CODE_PAGES.has(pathname)) {
@@ -30,7 +35,8 @@ export function getOutFolder(
 					return new URL('.' + appendForwardSlash(pathname), outRoot);
 				}
 				case 'file': {
-					return new URL('.' + appendForwardSlash(npath.dirname(pathname)), outRoot);
+					const d = pathname === '' ? pathname : npath.dirname(pathname);
+					return new URL('.' + appendForwardSlash(d), outRoot);
 				}
 			}
 	}
@@ -46,6 +52,7 @@ export function getOutFile(
 		case 'endpoint':
 			return new URL(npath.basename(pathname), outFolder);
 		case 'page':
+		case 'redirect':
 			switch (astroConfig.build.format) {
 				case 'directory': {
 					if (STATUS_CODE_PAGES.has(pathname)) {

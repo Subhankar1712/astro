@@ -2,7 +2,7 @@ import { expect } from 'chai';
 import { z } from 'zod';
 import stripAnsi from 'strip-ansi';
 import { formatConfigErrorMessage } from '../../../dist/core/messages.js';
-import { validateConfig } from '../../../dist/core/config/index.js';
+import { validateConfig } from '../../../dist/core/config/config.js';
 
 describe('Config Validation', () => {
 	it('empty user config is valid', async () => {
@@ -67,5 +67,14 @@ describe('Config Validation', () => {
 			process.cwd()
 		).catch((err) => err);
 		expect(configError).to.be.not.instanceOf(Error);
+	});
+	it('Error when outDir is placed within publicDir', async () => {
+		const configError = await validateConfig({ outDir: './public/dist' }, process.cwd()).catch(
+			(err) => err
+		);
+		expect(configError instanceof z.ZodError).to.equal(true);
+		expect(configError.errors[0].message).to.equal(
+			'The value of `outDir` must not point to a path within the folder set as `publicDir`, this will cause an infinite loop'
+		);
 	});
 });

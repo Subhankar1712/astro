@@ -1,18 +1,21 @@
+import { resolveConfig } from 'vite';
 import { expect } from 'chai';
 import { cachedCompilation } from '../../../dist/core/compile/index.js';
-import { AggregateError } from '../../../dist/core/util.js';
+import { AggregateError } from '../../../dist/core/errors/index.js';
+import { pathToFileURL } from 'node:url';
 
 describe('astro/src/core/compile', () => {
 	describe('Invalid CSS', () => {
 		it('throws an aggregate error with the errors', async () => {
 			let error;
 			try {
-				let r = await cachedCompilation({
-					config: /** @type {any} */ ({
-						root: '/',
-					}),
+				await cachedCompilation({
+					astroConfig: {
+						root: pathToFileURL('/'),
+						experimental: {},
+					},
+					viteConfig: await resolveConfig({ configFile: false }, 'serve'),
 					filename: '/src/pages/index.astro',
-					moduleId: '/src/pages/index.astro',
 					source: `
 	---
 	---
@@ -27,16 +30,13 @@ describe('astro/src/core/compile', () => {
 		}
 	</style>
 	`,
-					transformStyle(source, lang) {
-						throw new Error('Invalid css');
-					},
 				});
 			} catch (err) {
 				error = err;
 			}
 
 			expect(error).to.be.an.instanceOf(AggregateError);
-			expect(error.errors[0].message).to.contain('Invalid css');
+			expect(error.errors[0].message).to.contain('expected ")"');
 		});
 	});
 });

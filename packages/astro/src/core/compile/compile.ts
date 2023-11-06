@@ -1,123 +1,122 @@
 import type { TransformResult } from '@astrojs/compiler';
-import type { AstroConfig } from '../../@types/astro';
-import type { TransformStyle } from './types';
+import type { ResolvedConfig } from 'vite';
+import type { AstroConfig } from '../../@types/astro.js';
 
 import { transform } from '@astrojs/compiler';
-import { AstroErrorCodes } from '../errors.js';
-import { prependForwardSlash } from '../path.js';
-import { AggregateError, viteID } from '../util.js';
+import { fileURLToPath } from 'node:url';
+import { normalizePath } from 'vite';
+import { AggregateError, AstroError, CompilerError } from '../errors/errors.js';
+import { AstroErrorData } from '../errors/index.js';
+import { resolvePath } from '../util.js';
 import { createStylePreprocessor } from './style.js';
 
-type CompilationCache = Map<string, CompileResult>;
-type CompileResult = TransformResult & {
+export interface CompileProps {
+	astroConfig: AstroConfig;
+	viteConfig: ResolvedConfig;
+	filename: string;
+	source: string;
+}
+
+export interface CompileResult extends TransformResult {
 	cssDeps: Set<string>;
 	source: string;
-};
-
-const configCache = new WeakMap<AstroConfig, CompilationCache>();
-
-export interface CompileProps {
-	config: AstroConfig;
-	filename: string;
-	moduleId: string;
-	source: string;
-	transformStyle: TransformStyle;
 }
 
-async function compile({
-	config,
+export async function compile({
+	astroConfig,
+	viteConfig,
 	filename,
-	moduleId,
 	source,
-	transformStyle,
 }: CompileProps): Promise<CompileResult> {
-	let cssDeps = new Set<string>();
-	let cssTransformErrors: Error[] = [];
+	const cssDeps = new Set<string>();
+	const cssTransformErrors: AstroError[] = [];
+	let transformResult: TransformResult;
 
-	// Transform from `.astro` to valid `.ts`
-	// use `sourcemap: "both"` so that sourcemap is included in the code
-	// result passed to esbuild, but also available in the catch handler.
-	const transformResult = await transform(source, {
-		// For Windows compat, prepend the module ID with `/@fs`
-		pathname: `/@fs${prependForwardSlash(moduleId)}`,
-		projectRoot: config.root.toString(),
-		site: config.site?.toString(),
-		sourcefile: filename,
-		sourcemap: 'both',
-		internalURL: `/@fs${prependForwardSlash(
-			viteID(new URL('../../runtime/server/index.js', import.meta.url))
-		)}`,
-		// TODO: baseline flag
-		experimentalStaticExtraction: true,
-		preprocessStyle: createStylePreprocessor(transformStyle, cssDeps, cssTransformErrors),
-	})
-		.catch((err) => {
-			// throw compiler errors here if encountered
-			err.code = err.code || AstroErrorCodes.UnknownCompilerError;
-			throw err;
-		})
-		.then((result) => {
-			switch (cssTransformErrors.length) {
-				case 0:
-					return result;
-				case 1: {
-					let error = cssTransformErrors[0];
-					if (!(error as any).code) {
-						(error as any).code = AstroErrorCodes.UnknownCompilerCSSError;
-					}
-					throw cssTransformErrors[0];
-				}
-				default: {
-					const aggregateError = new AggregateError(cssTransformErrors);
-					(aggregateError as any).code = AstroErrorCodes.UnknownCompilerCSSError;
-					throw aggregateError;
-				}
-			}
+	try {
+		// Transform from `.astro` to valid `.ts`
+		// use `sourcemap: "both"` so that sourcemap is included in the code
+		// result passed to esbuild, but also available in the catch handler.
+		transformResult = await transform(source, {
+			compact: astroConfig.compressHTML,
+			filename,
+			normalizedFilename: normalizeFilename(filename, astroConfig.root),
+			sourcemap: 'both',
+			internalURL: 'astro/compiler-runtime',
+			astroGlobalArgs: JSON.stringify(astroConfig.site),
+			scopedStyleStrategy: astroConfig.scopedStyleStrategy,
+			resultScopedSlot: true,
+			transitionsAnimationURL: 'astro/components/viewtransitions.css',
+			preprocessStyle: createStylePreprocessor({
+				filename,
+				viteConfig,
+				cssDeps,
+				cssTransformErrors,
+			}),
+			async resolvePath(specifier) {
+				return resolvePath(specifier, filename);
+			},
 		});
+	} catch (err: any) {
+		// The compiler should be able to handle errors by itself, however
+		// for the rare cases where it can't let's directly throw here with as much info as possible
+		throw new CompilerError({
+			...AstroErrorData.UnknownCompilerError,
+			message: err.message ?? 'Unknown compiler error',
+			stack: err.stack,
+			location: {
+				file: filename,
+			},
+		});
+	}
 
-	const compileResult: CompileResult = Object.create(transformResult, {
-		cssDeps: {
-			value: cssDeps,
-		},
-		source: {
-			value: source,
-		},
-	});
+	handleCompileResultErrors(transformResult, cssTransformErrors);
 
-	return compileResult;
+	return {
+		...transformResult,
+		cssDeps,
+		source,
+	};
 }
 
-export function isCached(config: AstroConfig, filename: string) {
-	return configCache.has(config) && configCache.get(config)!.has(filename);
-}
+function handleCompileResultErrors(result: TransformResult, cssTransformErrors: AstroError[]) {
+	// TODO: Export the DiagnosticSeverity enum from @astrojs/compiler?
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-enum-comparison
+	const compilerError = result.diagnostics.find((diag) => diag.severity === 1);
 
-export function getCachedSource(config: AstroConfig, filename: string): string | null {
-	if (!isCached(config, filename)) return null;
-	let src = configCache.get(config)!.get(filename);
-	if (!src) return null;
-	return src.source;
-}
+	if (compilerError) {
+		throw new CompilerError({
+			name: 'CompilerError',
+			message: compilerError.text,
+			location: {
+				line: compilerError.location.line,
+				column: compilerError.location.column,
+				file: compilerError.location.file,
+			},
+			hint: compilerError.hint,
+		});
+	}
 
-export function invalidateCompilation(config: AstroConfig, filename: string) {
-	if (configCache.has(config)) {
-		const cache = configCache.get(config)!;
-		cache.delete(filename);
+	switch (cssTransformErrors.length) {
+		case 0:
+			break;
+		case 1: {
+			throw cssTransformErrors[0];
+		}
+		default: {
+			throw new AggregateError({
+				...cssTransformErrors[0],
+				errors: cssTransformErrors,
+			});
+		}
 	}
 }
 
-export async function cachedCompilation(props: CompileProps): Promise<CompileResult> {
-	const { config, filename } = props;
-	let cache: CompilationCache;
-	if (!configCache.has(config)) {
-		cache = new Map();
-		configCache.set(config, cache);
+function normalizeFilename(filename: string, root: URL) {
+	const normalizedFilename = normalizePath(filename);
+	const normalizedRoot = normalizePath(fileURLToPath(root));
+	if (normalizedFilename.startsWith(normalizedRoot)) {
+		return normalizedFilename.slice(normalizedRoot.length - 1);
 	} else {
-		cache = configCache.get(config)!;
+		return normalizedFilename;
 	}
-	if (cache.has(filename)) {
-		return cache.get(filename)!;
-	}
-	const compileResult = await compile(props);
-	cache.set(filename, compileResult);
-	return compileResult;
 }
